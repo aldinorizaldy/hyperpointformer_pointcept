@@ -11,9 +11,24 @@ import torch
 import torch.nn as nn
 
 from pointcept.models.builder import MODELS
-from .utils import CrossViTPointFusion, BatchMeanPool
+from .utils import CrossViTPointFusion
 
 from .point_transformer_seg import TransitionDown, TransitionUp, Bottleneck
+
+class EncoderBlock(nn.Module):
+    def __init__(self, block, in_planes, planes, blocks, share_planes=8, stride=1, nsample=16):
+        super().__init__()
+        self.transition = TransitionDown(in_planes, planes * block.expansion, stride, nsample)
+        self.blocks = nn.Sequential(
+            *[block(planes * block.expansion, planes * block.expansion, share_planes, nsample=nsample)
+              for _ in range(blocks)]
+        )
+
+    def forward(self, pxo, fps_idx=None):
+        p, x, o, idx = self.transition(pxo, fps_idx)
+        pxo = [p, x, o]
+        p, x, o = self.blocks(pxo)
+        return p, x, o, idx
 
 
 class HyperPointFormer(nn.Module):
@@ -54,21 +69,20 @@ class HyperPointFormer(nn.Module):
         self.fusion3 = CrossViTPointFusion(dim=planes[2])
         self.fusion4 = CrossViTPointFusion(dim=planes[3])
         self.fusion5 = CrossViTPointFusion(dim=planes[4])
-        self.batch_mean_pool = BatchMeanPool()
         self.dec5 = self._make_dec(
-            block, planes[4], 1, share_planes, nsample=nsample[4], is_head=True
+            block, planes[4]*block.expansion, planes[4], 1, share_planes, nsample=nsample[4], is_head=True
         )  # transform p5
         self.dec4 = self._make_dec(
-            block, planes[3], 1, share_planes, nsample=nsample[3]
+            block, planes[3]*block.expansion, planes[3], 1, share_planes, nsample=nsample[3]
         )  # fusion p5 and p4
         self.dec3 = self._make_dec(
-            block, planes[2], 1, share_planes, nsample=nsample[2]
+            block, planes[2]*block.expansion, planes[2], 1, share_planes, nsample=nsample[2]
         )  # fusion p4 and p3
         self.dec2 = self._make_dec(
-            block, planes[1], 1, share_planes, nsample=nsample[1]
+            block, planes[1]*block.expansion, planes[1], 1, share_planes, nsample=nsample[1]
         )  # fusion p3 and p2
         self.dec1 = self._make_dec(
-            block, planes[0], 1, share_planes, nsample=nsample[0]
+            block, planes[0]*block.expansion, planes[0], 1, share_planes, nsample=nsample[0]
         )  # fusion p2 and p1
         self.cls = nn.Sequential(
             nn.Linear(planes[0], planes[0]),
@@ -78,24 +92,17 @@ class HyperPointFormer(nn.Module):
         )
 
     def _make_enc(self, block, in_planes, planes, blocks, share_planes=8, stride=1, nsample=16):
+        return EncoderBlock(block, in_planes, planes, blocks, share_planes, stride, nsample)
+
+    def _make_dec(
+        self, block, in_planes, planes, blocks, share_planes=8, nsample=16, is_head=False
+    ):
         layers = []
-        layers.append(TransitionDown(in_planes, planes * block.expansion, stride, nsample))
+        layers.append(TransitionUp(in_planes, None if is_head else planes * block.expansion))
         current_in_planes = planes * block.expansion
         for _ in range(blocks):
             layers.append(
                 block(current_in_planes, current_in_planes, share_planes, nsample=nsample)
-            )
-        return nn.Sequential(*layers)
-
-    def _make_dec(
-        self, block, planes, blocks, share_planes=8, nsample=16, is_head=False
-    ):
-        layers = []
-        layers.append(TransitionUp(self.in_planes, None if is_head else planes * block.expansion))
-        self.in_planes = planes * block.expansion
-        for _ in range(blocks):
-            layers.append(
-                block(self.in_planes, self.in_planes, share_planes, nsample=nsample)
             )
         return nn.Sequential(*layers)
 
@@ -122,11 +129,14 @@ class HyperPointFormer(nn.Module):
         p5_HS , x5_HS, o5_HS, _ = self.enc5_HS([p4_HS, x4_HS, o4_HS], fps_idx=idx5)
 
         # Cross Attenton Fusion
-        x1_fused = self.fusion1(x1_L, x1_HS, o1_L, self.batch_mean_pool)
-        x2_fused = self.fusion2(x2_L, x2_HS, o2_L, self.batch_mean_pool)
-        x3_fused = self.fusion3(x3_L, x3_HS, o3_L, self.batch_mean_pool)
-        x4_fused = self.fusion4(x4_L, x4_HS, o4_L, self.batch_mean_pool)
-        x5_fused = self.fusion5(x5_L, x5_HS, o5_L, self.batch_mean_pool)
+        x1_fused = self.fusion1(x1_L, x1_HS, o1_L)
+        x2_fused = self.fusion2(x2_L, x2_HS, o2_L)
+        x3_fused = self.fusion3(x3_L, x3_HS, o3_L)
+        x4_fused = self.fusion4(x4_L, x4_HS, o4_L)
+        x5_fused = self.fusion5(x5_L, x5_HS, o5_L)
+        
+        print("x4_fused", x4_fused.shape)
+        print("TransitionUp expects", self.dec4[0].linear2.in_features)
 
         x5 = self.dec5[1:]([p5_L, self.dec5[0]([p5_L, x5_fused, o5_L]), o5_L])[1]
         x4 = self.dec4[1:]([p4_L, self.dec4[0]([p4_L, x4_fused, o4_L], [p5_L, x5, o5_L]), o4_L])[1]
