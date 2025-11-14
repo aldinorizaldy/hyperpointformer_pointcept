@@ -120,9 +120,10 @@ class TransitionDown(nn.Module):
             )  # (m, c, nsample)
             x = self.pool(x).squeeze(-1)  # (m, c)
             p, o = n_p, n_o
+            return [p, x , o, idx]
         else:
             x = self.relu(self.bn(self.linear(x)))  # (n, c)
-        return [p, x, o]
+            return [p, x, o, None]
 
 
 class TransitionUp(nn.Module):
