@@ -50,7 +50,7 @@ This version leverages **PointCept** to handle large-scale point clouds more eff
 To prepare the IEEE DFC 2018 dataset for training HyperPointFormer, follow the steps below.
 
 ### 1. Download the Raw Data
-The preprocessed DFC2018 dataset can be downloaded from [here](link)
+The preprocessed DFC2018 dataset can be downloaded from [here](https://drive.google.com/drive/folders/1YqAwXD-ceYssqMPu8LJy8WfPnsL_77Ri?usp=sharing)
 
 
 ### 2. Run Data Preparation
