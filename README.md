@@ -41,31 +41,4 @@ The main advantage of this version is its ability to efficiently process **large
 
 ---
 
-## Notes
-
-- The classes correspond to:
-
-| ID | Class Name |
-|----|------------|
-| 1  | Healthy grass |
-| 2  | Stressed grass |
-| 3  | Evergreen trees |
-| 4  | Deciduous trees |
-| 5  | Bare earth |
-| 6  | Water |
-| 7  | Residential buildings |
-| 8  | Non-residential buildings |
-| 9  | Roads |
-| 10 | Sidewalks |
-| 11 | Crosswalks |
-| 12 | Major thoroughfares |
-| 13 | Highways |
-| 14 | Railways |
-| 15 | Paved parking lots |
-| 16 | Unpaved parking lots |
-| 17 | Cars |
-| 18 | Trains |
-
----
-
 This version leverages **PointCept** to handle large-scale point clouds more efficiently, resulting in **improved segmentation metrics** compared to the baseline Point Transformer.
