@@ -58,3 +58,11 @@ Use the provided script to convert the npy point cloud data into block files:
 
 ```bash
 python prepare_blocks.py 
+```
+
+### 3. Training
+Then follow Pointcept training pipeline
+
+```bash
+train.sh -g 4 -d dfc2018 -c semseg-hyperpointformer -n dfc2018_semseg-hpf-0-base
+```
