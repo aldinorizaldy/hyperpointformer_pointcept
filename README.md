@@ -42,3 +42,19 @@ The main advantage of this version is its ability to efficiently process **large
 ---
 
 This version leverages **PointCept** to handle large-scale point clouds more efficiently, resulting in **improved segmentation metrics** compared to the baseline Point Transformer.
+
+---
+
+## Data Preparation (IEEE GRSS DFC 2018)
+
+To prepare the IEEE DFC 2018 dataset for training HyperPointFormer, follow the steps below.
+
+### 1. Download the Raw Data
+The preprocessed DFC2018 dataset can be downloaded from [here](link)
+
+
+### 2. Run Data Preparation
+Use the provided script to convert the npy point cloud data into block files:
+
+```bash
+python prepare_blocks.py 
