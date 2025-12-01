@@ -66,3 +66,6 @@ Then follow Pointcept training pipeline
 ```bash
 train.sh -g 4 -d dfc2018 -c semseg-hyperpointformer -n dfc2018_semseg-hpf-0-base
 ```
+
+Cite paper here:
+> A. Rizaldy, R. Gloaguen, F. E. Fassnacht and P. Ghamisi, "HyperPointFormer: Multimodal Fusion in 3-D Space With Dual-Branch Cross-Attention Transformers," in IEEE Journal of Selected Topics in Applied Earth Observations and Remote Sensing, vol. 18, pp. 21254-21274, 2025, https://doi.org/10.1109/JSTARS.2025.3595648
