@@ -69,6 +69,9 @@ class CrossViTPointFusion(nn.Module):
 
         self.return_cls = return_cls
 
+        # ensure dimension matches
+        self.out_proj = nn.Linear(dim, dim)
+
     def _reshape_for_heads(self, x, B, L=None):
         # x: (B, L, C) or (total_tokens, C) => reshape to (B, H, L, C/H)
         # If input is (total_tokens, C) we expect L varies per sample; we avoid reshaping there.
@@ -164,6 +167,8 @@ class CrossViTPointFusion(nn.Module):
             s += cnt
 
         x_a_out = torch.cat(x_a_out_list, dim=0)  # (N, C)
+
+        x_a_out = self.out_proj(x_a_out)
 
         if self.return_cls:
             return x_a_out, out_cls  # (N,C), (B,C)

@@ -1,6 +1,6 @@
 _base_ = ["../_base_/default_runtime.py"]
 # misc custom setting
-batch_size = 4  # bs: total bs in all gpus
+batch_size = 12 # 4  # bs: total bs in all gpus
 mix_prob = 0
 empty_cache = False
 enable_amp = True
@@ -12,6 +12,7 @@ model = dict(
         type="HyperPointFormer",
         lidar_in_channels=7,
         hs_in_channels=8,
+        # in_channels = 15,
         num_classes=18,
     ),
     criteria=[dict(type="CrossEntropyLoss", loss_weight=1.0, ignore_index=-1)],

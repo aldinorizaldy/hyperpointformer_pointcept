@@ -1,10 +1,6 @@
 """
-Point Transformer V1 for Semantic Segmentation
-
-Might be a bit different from the original paper
-
-Author: Xiaoyang Wu (xiaoyang.wu.cs@gmail.com)
-Please cite our work if the code is helpful to you.
+HyperPointFormer, 
+adapted from Point Transformer V1 for Semantic Segmentation
 """
 
 import torch
@@ -14,6 +10,29 @@ import pointops
 
 from pointcept.models.builder import MODELS
 from .utils import LayerNorm1d
+
+class EncoderStage(nn.Module):
+    def __init__(self, down: nn.Module, blocks: list):
+        """
+        down: TransitionDown module
+        blocks: list of Bottleneck / PointTransformerLayer blocks
+        """
+        super().__init__()
+        self.down = down
+        self.blocks = nn.ModuleList(blocks)
+
+    def forward(self, pxo, idx=None, n_o=None):
+        # pxo = [p, x, o]
+        p, x, o = pxo
+
+        # Run TransitionDown, pass external idx/n_o if provided
+        p, x, o = self.down([p, x, o], idx=idx, n_o=n_o)
+
+        # Pass through residual/transformer blocks
+        for block in self.blocks:
+            p, x, o = block([p, x, o])
+
+        return [p, x, o]
 
 
 class PointTransformerLayer(nn.Module):
@@ -90,15 +109,16 @@ class TransitionDown(nn.Module):
         self.bn = nn.BatchNorm1d(out_planes)
         self.relu = nn.ReLU(inplace=True)
 
-    def forward(self, pxo):
+    def forward(self, pxo, idx=None, n_o=None):
         p, x, o = pxo  # (n, 3), (n, c), (b)
         if self.stride != 1:
-            n_o, count = [o[0].item() // self.stride], o[0].item() // self.stride
-            for i in range(1, o.shape[0]):
-                count += (o[i].item() - o[i - 1].item()) // self.stride
-                n_o.append(count)
-            n_o = torch.cuda.IntTensor(n_o)
-            idx = pointops.farthest_point_sampling(p, o, n_o)  # (m)
+            if idx is None or n_o is None:
+                n_o, count = [o[0].item() // self.stride], o[0].item() // self.stride
+                for i in range(1, o.shape[0]):
+                    count += (o[i].item() - o[i - 1].item()) // self.stride
+                    n_o.append(count)
+                n_o = torch.cuda.IntTensor(n_o)
+                idx = pointops.farthest_point_sampling(p, o, n_o)  # (m)
             n_p = p[idx.long(), :]  # (m, 3)
             x, _ = pointops.knn_query_and_group(
                 x,
@@ -191,54 +211,127 @@ class Bottleneck(nn.Module):
         x = self.relu(x)
         return [p, x, o]
 
+def compute_new_offsets(o, stride):
+    n_o, count = [o[0].item() // stride], o[0].item() // stride
+    for i in range(1, o.shape[0]):
+        count += (o[i].item() - o[i - 1].item()) // stride
+        n_o.append(count)
+    return torch.cuda.IntTensor(n_o)
 
-class PointTransformerSeg(nn.Module):
-    def __init__(self, block, blocks, in_channels=6, num_classes=13):
+class LocalCrossAttention(nn.Module):
+    def __init__(self, in_planes, share_planes=8, nsample=16):
         super().__init__()
-        self.in_channels = in_channels
-        self.in_planes, planes = in_channels, [32, 64, 128, 256, 512]
+        self.mid_planes = in_planes
+        self.share_planes = share_planes
+        self.nsample = nsample
+
+        self.linear_q = nn.Linear(in_planes, in_planes)
+        self.linear_k = nn.Linear(in_planes, in_planes)
+        self.linear_v = nn.Linear(in_planes, in_planes)
+
+        # same positional encoder used in PTv1
+        self.linear_p = nn.Sequential(
+            nn.Linear(3, 3),
+            LayerNorm1d(3),
+            nn.ReLU(inplace=True),
+            nn.Linear(3, in_planes),
+        )
+
+        # same neighborhood weighting as PointTransformer
+        self.linear_w = nn.Sequential(
+            LayerNorm1d(in_planes),
+            nn.ReLU(inplace=True),
+            nn.Linear(in_planes, in_planes // share_planes),
+            LayerNorm1d(in_planes // share_planes),
+            nn.ReLU(inplace=True),
+            nn.Linear(in_planes // share_planes, in_planes // share_planes),
+        )
+
+        self.softmax = nn.Softmax(dim=1)
+
+    def forward(self, p, Q, KV, o):
+        # Q shape = (N, C)
+        # KV shape = (N, C)
+
+        q = self.linear_q(Q)
+        k = self.linear_k(KV)
+        v = self.linear_v(KV)
+
+        # local grouping (same as PTv1)
+        k, idx = pointops.knn_query_and_group(
+            k, p, o, new_xyz=p, new_offset=o, nsample=self.nsample, with_xyz=True
+        )
+        v, _ = pointops.knn_query_and_group(
+            v, p, o, new_xyz=p, new_offset=o, idx=idx, nsample=self.nsample, with_xyz=False
+        )
+
+        p_r, k = k[:, :, 0:3], k[:, :, 3:]
+        p_r = self.linear_p(p_r)
+
+        r_qk = k - q.unsqueeze(1) + p_r
+        w = self.linear_w(r_qk)
+        w = self.softmax(w)
+
+        out = torch.einsum(
+            "n t s i, n t i -> n s i",
+            einops.rearrange(v + p_r, "n ns (s i) -> n ns s i", s=self.share_planes),
+            w,
+        )
+        out = einops.rearrange(out, "n s i -> n (s i)")
+        return out
+
+
+
+class HyperPointFormer(nn.Module):
+    def __init__(self, block, blocks, lidar_in_channels=6, hs_in_channels = 6, num_classes=13):
+        super().__init__()
+        self.lidar_in_channels = lidar_in_channels
+        self.hs_in_channels = hs_in_channels
+        self.lidar_in_planes, self.hs_in_planes, planes = lidar_in_channels, hs_in_channels, [32, 64, 128, 256, 512]
         fpn_planes, fpnhead_planes, share_planes = 128, 64, 8
         stride, nsample = [1, 4, 4, 4, 4], [8, 16, 16, 16, 16]
-        self.enc1 = self._make_enc(
-            block,
-            planes[0],
-            blocks[0],
-            share_planes,
-            stride=stride[0],
-            nsample=nsample[0],
-        )  # N/1
-        self.enc2 = self._make_enc(
-            block,
-            planes[1],
-            blocks[1],
-            share_planes,
-            stride=stride[1],
-            nsample=nsample[1],
-        )  # N/4
-        self.enc3 = self._make_enc(
-            block,
-            planes[2],
-            blocks[2],
-            share_planes,
-            stride=stride[2],
-            nsample=nsample[2],
-        )  # N/16
-        self.enc4 = self._make_enc(
-            block,
-            planes[3],
-            blocks[3],
-            share_planes,
-            stride=stride[3],
-            nsample=nsample[3],
-        )  # N/64
-        self.enc5 = self._make_enc(
-            block,
-            planes[4],
-            blocks[4],
-            share_planes,
-            stride=stride[4],
-            nsample=nsample[4],
-        )  # N/256
+        
+        self.enc1 = EncoderStage(
+            down=TransitionDown(self.lidar_in_planes, planes[0], stride=stride[0], nsample=nsample[0]),
+            blocks=[Bottleneck(planes[0], planes[0], share_planes, nsample=nsample[0]) for _ in range(blocks[0])]
+        )
+
+        self.enc1_HS = EncoderStage(
+            down=TransitionDown(self.hs_in_planes, planes[0], stride=stride[0], nsample=nsample[0]),
+            blocks=[Bottleneck(planes[0], planes[0], share_planes, nsample=nsample[0]) for _ in range(blocks[0])]
+        )
+
+        self.cross1 = LocalCrossAttention(
+            in_planes=planes[0],     
+            share_planes=share_planes,
+            nsample=nsample[0]
+        )
+        self.alpha_L = nn.Parameter(torch.tensor(0.01))
+        self.alpha_H = nn.Parameter(torch.tensor(0.01))
+
+        self.enc2 = EncoderStage(
+            down=TransitionDown(planes[0], planes[1], stride=stride[1], nsample=nsample[1]),
+            blocks=[Bottleneck(planes[1], planes[1], share_planes, nsample=nsample[1]) for _ in range(blocks[1])]
+        )
+
+        self.enc3 = EncoderStage(
+            down=TransitionDown(planes[1], planes[2], stride=stride[2], nsample=nsample[2]),
+            blocks=[Bottleneck(planes[2], planes[2], share_planes, nsample=nsample[2]) for _ in range(blocks[2])]
+        )
+        
+        self.enc4 = EncoderStage(
+            down=TransitionDown(planes[2], planes[3], stride=stride[3], nsample=nsample[3]),
+            blocks=[Bottleneck(planes[3], planes[3], share_planes, nsample=nsample[3]) for _ in range(blocks[3])]
+        )
+
+        self.enc5 = EncoderStage(
+            down=TransitionDown(planes[3], planes[4], stride=stride[4], nsample=nsample[4]),
+            blocks=[Bottleneck(planes[4], planes[4], share_planes, nsample=nsample[4]) for _ in range(blocks[4])]
+        )
+
+        self.lidar_in_planes = planes[4]
+        self.hs_in_planes = planes[4]
+
         self.dec5 = self._make_dec(
             block, planes[4], 1, share_planes, nsample=nsample[4], is_head=True
         )  # transform p5
@@ -261,27 +354,16 @@ class PointTransformerSeg(nn.Module):
             nn.Linear(planes[0], num_classes),
         )
 
-    def _make_enc(self, block, planes, blocks, share_planes=8, stride=1, nsample=16):
-        layers = [
-            TransitionDown(self.in_planes, planes * block.expansion, stride, nsample)
-        ]
-        self.in_planes = planes * block.expansion
-        for _ in range(blocks):
-            layers.append(
-                block(self.in_planes, self.in_planes, share_planes, nsample=nsample)
-            )
-        return nn.Sequential(*layers)
-
     def _make_dec(
         self, block, planes, blocks, share_planes=8, nsample=16, is_head=False
     ):
         layers = [
-            TransitionUp(self.in_planes, None if is_head else planes * block.expansion)
+            TransitionUp(self.lidar_in_planes, None if is_head else planes * block.expansion)
         ]
-        self.in_planes = planes * block.expansion
+        self.lidar_in_planes = planes * block.expansion
         for _ in range(blocks):
             layers.append(
-                block(self.in_planes, self.in_planes, share_planes, nsample=nsample)
+                block(self.lidar_in_planes, self.lidar_in_planes, share_planes, nsample=nsample)
             )
         return nn.Sequential(*layers)
 
@@ -289,39 +371,52 @@ class PointTransformerSeg(nn.Module):
         p0 = data_dict["coord"]
         x0 = data_dict["feat"]
         o0 = data_dict["offset"].int()
-        p1, x1, o1 = self.enc1([p0, x0, o0])
-        p2, x2, o2 = self.enc2([p1, x1, o1])
-        p3, x3, o3 = self.enc3([p2, x2, o2])
-        p4, x4, o4 = self.enc4([p3, x3, o3])
-        p5, x5, o5 = self.enc5([p4, x4, o4])
+        
+        # split features
+        x0, x0_HS  = torch.split(x0, [self.lidar_in_channels, self.hs_in_channels], dim=1)
+
+        n_o1 = compute_new_offsets(o0, stride=self.enc1.down.stride)
+        idx1 = pointops.farthest_point_sampling(p0, o0, n_o1)
+        p1, x1, o1 = self.enc1([p0, x0, o0], idx=idx1, n_o=n_o1)
+        _ , x1_HS, _ = self.enc1_HS([p0, x0_HS, o0], idx=idx1, n_o=n_o1)
+
+        L0 = x1
+        H0 = x1_HS
+        L_cross = self.cross1(p1, L0, H0, o1)
+        H_cross = self.cross1(p1, H0, L0, o1)
+        L1 = L0 + self.alpha_L * L_cross
+        H1 = H0 + self.alpha_H * H_cross
+        x1_fused = L1 + H1
+
+        n_o2 = compute_new_offsets(o1, stride=self.enc2.down.stride)
+        idx2 = pointops.farthest_point_sampling(p1, o1, n_o2)
+        p2, x2, o2 = self.enc2([p1, x1_fused, o1], idx=idx2, n_o=n_o2)
+
+        n_o3 = compute_new_offsets(o2, stride=self.enc3.down.stride)
+        idx3 = pointops.farthest_point_sampling(p2, o2, n_o3)
+        p3, x3, o3 = self.enc3([p2, x2, o2], idx=idx3, n_o=n_o3)
+
+        n_o4 = compute_new_offsets(o3, stride=self.enc4.down.stride)
+        idx4 = pointops.farthest_point_sampling(p3, o3, n_o4)
+        p4, x4, o4 = self.enc4([p3, x3, o3], idx=idx4, n_o=n_o4)
+
+        n_o5 = compute_new_offsets(o4, stride=self.enc5.down.stride)
+        idx5 = pointops.farthest_point_sampling(p4, o4, n_o5)
+        p5, x5, o5 = self.enc5([p4, x4, o4], idx=idx5, n_o=n_o5)
+
         x5 = self.dec5[1:]([p5, self.dec5[0]([p5, x5, o5]), o5])[1]
         x4 = self.dec4[1:]([p4, self.dec4[0]([p4, x4, o4], [p5, x5, o5]), o4])[1]
         x3 = self.dec3[1:]([p3, self.dec3[0]([p3, x3, o3], [p4, x4, o4]), o3])[1]
         x2 = self.dec2[1:]([p2, self.dec2[0]([p2, x2, o2], [p3, x3, o3]), o2])[1]
-        x1 = self.dec1[1:]([p1, self.dec1[0]([p1, x1, o1], [p2, x2, o2]), o1])[1]
+        x1 = self.dec1[1:]([p1, self.dec1[0]([p1, x1_fused, o1], [p2, x2, o2]), o1])[1]
         x = self.cls(x1)
         return x
 
 
-@MODELS.register_module("PointTransformer-Seg26")
-class PointTransformerSeg26(PointTransformerSeg):
+
+@MODELS.register_module("HyperPointFormer_Small")
+class HyperPointFormer(HyperPointFormer):
     def __init__(self, **kwargs):
-        super(PointTransformerSeg26, self).__init__(
-            Bottleneck, [1, 1, 1, 1, 1], **kwargs
-        )
-
-
-@MODELS.register_module("PointTransformer-Seg38")
-class PointTransformerSeg38(PointTransformerSeg):
-    def __init__(self, **kwargs):
-        super(PointTransformerSeg38, self).__init__(
-            Bottleneck, [1, 2, 2, 2, 2], **kwargs
-        )
-
-
-@MODELS.register_module("PointTransformer-Seg50")
-class PointTransformerSeg50(PointTransformerSeg):
-    def __init__(self, **kwargs):
-        super(PointTransformerSeg50, self).__init__(
+        super(HyperPointFormer, self).__init__(
             Bottleneck, [1, 2, 3, 5, 2], **kwargs
         )

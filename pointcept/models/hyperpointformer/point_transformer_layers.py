@@ -90,7 +90,7 @@ class TransitionDown(nn.Module):
         self.bn = nn.BatchNorm1d(out_planes)
         self.relu = nn.ReLU(inplace=True)
 
-    def forward(self, pxo):
+    def forward(self, pxo, fps_idx=None):
         p, x, o = pxo  # (n, 3), (n, c), (b)
         if self.stride != 1:
             n_o, count = [o[0].item() // self.stride], o[0].item() // self.stride
@@ -98,7 +98,13 @@ class TransitionDown(nn.Module):
                 count += (o[i].item() - o[i - 1].item()) // self.stride
                 n_o.append(count)
             n_o = torch.cuda.IntTensor(n_o)
-            idx = pointops.farthest_point_sampling(p, o, n_o)  # (m)
+
+            # Changes to include precomputed idx
+            # idx = pointops.farthest_point_sampling(p, o, n_o)  # (m)
+            if fps_idx is None:
+                idx = pointops.farthest_point_sampling(p, o, n_o)  # (m)
+            else:
+                idx = fps_idx
             n_p = p[idx.long(), :]  # (m, 3)
             x, _ = pointops.knn_query_and_group(
                 x,
@@ -114,9 +120,10 @@ class TransitionDown(nn.Module):
             )  # (m, c, nsample)
             x = self.pool(x).squeeze(-1)  # (m, c)
             p, o = n_p, n_o
+            return [p, x , o, idx]
         else:
             x = self.relu(self.bn(self.linear(x)))  # (n, c)
-        return [p, x, o]
+            return [p, x, o, None]
 
 
 class TransitionUp(nn.Module):
@@ -190,138 +197,3 @@ class Bottleneck(nn.Module):
         x += identity
         x = self.relu(x)
         return [p, x, o]
-
-
-class PointTransformerSeg(nn.Module):
-    def __init__(self, block, blocks, in_channels=6, num_classes=13):
-        super().__init__()
-        self.in_channels = in_channels
-        self.in_planes, planes = in_channels, [32, 64, 128, 256, 512]
-        fpn_planes, fpnhead_planes, share_planes = 128, 64, 8
-        stride, nsample = [1, 4, 4, 4, 4], [8, 16, 16, 16, 16]
-        self.enc1 = self._make_enc(
-            block,
-            planes[0],
-            blocks[0],
-            share_planes,
-            stride=stride[0],
-            nsample=nsample[0],
-        )  # N/1
-        self.enc2 = self._make_enc(
-            block,
-            planes[1],
-            blocks[1],
-            share_planes,
-            stride=stride[1],
-            nsample=nsample[1],
-        )  # N/4
-        self.enc3 = self._make_enc(
-            block,
-            planes[2],
-            blocks[2],
-            share_planes,
-            stride=stride[2],
-            nsample=nsample[2],
-        )  # N/16
-        self.enc4 = self._make_enc(
-            block,
-            planes[3],
-            blocks[3],
-            share_planes,
-            stride=stride[3],
-            nsample=nsample[3],
-        )  # N/64
-        self.enc5 = self._make_enc(
-            block,
-            planes[4],
-            blocks[4],
-            share_planes,
-            stride=stride[4],
-            nsample=nsample[4],
-        )  # N/256
-        self.dec5 = self._make_dec(
-            block, planes[4], 1, share_planes, nsample=nsample[4], is_head=True
-        )  # transform p5
-        self.dec4 = self._make_dec(
-            block, planes[3], 1, share_planes, nsample=nsample[3]
-        )  # fusion p5 and p4
-        self.dec3 = self._make_dec(
-            block, planes[2], 1, share_planes, nsample=nsample[2]
-        )  # fusion p4 and p3
-        self.dec2 = self._make_dec(
-            block, planes[1], 1, share_planes, nsample=nsample[1]
-        )  # fusion p3 and p2
-        self.dec1 = self._make_dec(
-            block, planes[0], 1, share_planes, nsample=nsample[0]
-        )  # fusion p2 and p1
-        self.cls = nn.Sequential(
-            nn.Linear(planes[0], planes[0]),
-            nn.BatchNorm1d(planes[0]),
-            nn.ReLU(inplace=True),
-            nn.Linear(planes[0], num_classes),
-        )
-
-    def _make_enc(self, block, planes, blocks, share_planes=8, stride=1, nsample=16):
-        layers = [
-            TransitionDown(self.in_planes, planes * block.expansion, stride, nsample)
-        ]
-        self.in_planes = planes * block.expansion
-        for _ in range(blocks):
-            layers.append(
-                block(self.in_planes, self.in_planes, share_planes, nsample=nsample)
-            )
-        return nn.Sequential(*layers)
-
-    def _make_dec(
-        self, block, planes, blocks, share_planes=8, nsample=16, is_head=False
-    ):
-        layers = [
-            TransitionUp(self.in_planes, None if is_head else planes * block.expansion)
-        ]
-        self.in_planes = planes * block.expansion
-        for _ in range(blocks):
-            layers.append(
-                block(self.in_planes, self.in_planes, share_planes, nsample=nsample)
-            )
-        return nn.Sequential(*layers)
-
-    def forward(self, data_dict):
-        p0 = data_dict["coord"]
-        x0 = data_dict["feat"]
-        o0 = data_dict["offset"].int()
-        p1, x1, o1 = self.enc1([p0, x0, o0])
-        p2, x2, o2 = self.enc2([p1, x1, o1])
-        p3, x3, o3 = self.enc3([p2, x2, o2])
-        p4, x4, o4 = self.enc4([p3, x3, o3])
-        p5, x5, o5 = self.enc5([p4, x4, o4])
-        x5 = self.dec5[1:]([p5, self.dec5[0]([p5, x5, o5]), o5])[1]
-        x4 = self.dec4[1:]([p4, self.dec4[0]([p4, x4, o4], [p5, x5, o5]), o4])[1]
-        x3 = self.dec3[1:]([p3, self.dec3[0]([p3, x3, o3], [p4, x4, o4]), o3])[1]
-        x2 = self.dec2[1:]([p2, self.dec2[0]([p2, x2, o2], [p3, x3, o3]), o2])[1]
-        x1 = self.dec1[1:]([p1, self.dec1[0]([p1, x1, o1], [p2, x2, o2]), o1])[1]
-        x = self.cls(x1)
-        return x
-
-
-@MODELS.register_module("PointTransformer-Seg26")
-class PointTransformerSeg26(PointTransformerSeg):
-    def __init__(self, **kwargs):
-        super(PointTransformerSeg26, self).__init__(
-            Bottleneck, [1, 1, 1, 1, 1], **kwargs
-        )
-
-
-@MODELS.register_module("PointTransformer-Seg38")
-class PointTransformerSeg38(PointTransformerSeg):
-    def __init__(self, **kwargs):
-        super(PointTransformerSeg38, self).__init__(
-            Bottleneck, [1, 2, 2, 2, 2], **kwargs
-        )
-
-
-@MODELS.register_module("PointTransformer-Seg50")
-class PointTransformerSeg50(PointTransformerSeg):
-    def __init__(self, **kwargs):
-        super(PointTransformerSeg50, self).__init__(
-            Bottleneck, [1, 2, 3, 5, 2], **kwargs
-        )
