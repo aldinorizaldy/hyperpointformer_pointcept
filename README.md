@@ -49,9 +49,8 @@ This version leverages **PointCept** to handle large-scale point clouds more eff
 
 To prepare the IEEE DFC 2018 dataset for training HyperPointFormer, follow the steps below.
 
-### 1. Download the Raw Data
+### 1. Download the Preprocessed Data
 The preprocessed DFC2018 dataset can be downloaded from [here](https://drive.google.com/drive/folders/1YqAwXD-ceYssqMPu8LJy8WfPnsL_77Ri?usp=sharing)
-
 
 ### 2. Run Data Preparation
 Use the provided script to convert the npy point cloud data into block files:
@@ -59,6 +58,7 @@ Use the provided script to convert the npy point cloud data into block files:
 ```bash
 python prepare_blocks.py 
 ```
+Run the script twice, but change the path "/Train_Fold_1.npy" to "/Train_Fold_2.npy" in the second run, and the save_dir "data/dfc2018_fold1/train" to "data/dfc2018_fold1/val".
 
 ### 3. Training
 Then follow Pointcept training pipeline
@@ -67,5 +67,5 @@ Then follow Pointcept training pipeline
 train.sh -g 4 -d dfc2018 -c semseg-hyperpointformer -n dfc2018_semseg-hpf-0-base
 ```
 
-Cite paper here:
+Please cite paper here:
 > A. Rizaldy, R. Gloaguen, F. E. Fassnacht and P. Ghamisi, "HyperPointFormer: Multimodal Fusion in 3-D Space With Dual-Branch Cross-Attention Transformers," in IEEE Journal of Selected Topics in Applied Earth Observations and Remote Sensing, vol. 18, pp. 21254-21274, 2025, https://doi.org/10.1109/JSTARS.2025.3595648
