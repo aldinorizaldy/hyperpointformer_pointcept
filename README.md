@@ -3,6 +3,8 @@
 This is a second version of **HyperPointFormer**, built on top of the **PointCept** codebase.  
 The main advantage of this version is its ability to efficiently process **large point clouds** while maintaining strong segmentation accuracy.
 
+For installation, please follow [Pointcept v1.5.0](https://github.com/Pointcept/Pointcept/releases/tag/v1.5.0). The easiest is to setup environment using [docker](https://hub.docker.com/layers/pointcept/pointcept/v1.5.0-pytorch1.11.0-cuda11.3-cudnn8-devel/images/sha256-8bdaf256670ec7e2f1a3472769ca9c97a1cb2b099f632ec20bf6050c21feb823).
+
 ---
 
 ## Performance Comparison
